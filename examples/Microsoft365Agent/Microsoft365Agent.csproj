@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/GodelGate.Microsoft365/GodelGate.Microsoft365.csproj" />
+    <PackageReference Include="Microsoft.Agents.Hosting.AspNetCore" Version="1.9.205" />
+    <PackageReference Include="Microsoft.Agents.Authentication.Msal" Version="1.9.205" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.14" />
+  </ItemGroup>
+</Project>

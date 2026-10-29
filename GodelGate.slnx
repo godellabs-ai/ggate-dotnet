@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/Microsoft365Agent/Microsoft365Agent.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/GodelGate.Microsoft365/GodelGate.Microsoft365.csproj" />
+    <Project Path="src/GodelGate/GodelGate.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/GodelGate.Tests/GodelGate.Tests.csproj" />
+  </Folder>
+</Solution>

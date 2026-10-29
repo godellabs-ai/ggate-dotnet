@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PackageId>GodelGate.Microsoft365</PackageId>
+    <Description>Gödel Gate middleware for Microsoft 365 Agents SDK.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../GodelGate/GodelGate.csproj" />
+    <PackageReference Include="Microsoft.Agents.Builder" Version="1.9.205" />
+  </ItemGroup>
+</Project>
