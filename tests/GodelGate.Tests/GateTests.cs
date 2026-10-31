@@ -1,7 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
+using GodelGate.AI;
 using GodelGate.Microsoft365;
+using GodelGate.SemanticKernel;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.Agents.Builder;
 using Microsoft.Agents.Core.Models;
 using Xunit;
@@ -17,7 +23,7 @@ public sealed class GateTests
     {
         public List<JsonObject> Events { get; } = [];
         public List<string> Paths { get; } = [];
-        public bool RejectFirstScan, Fail, Malformed;
+        public bool RejectFirstScan, Fail, Malformed, Locked;
         public int Exchanges, Refreshes;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -43,6 +49,8 @@ public sealed class GateTests
             Events.Add((JsonObject)ev.DeepClone());
             if (RejectFirstScan) { RejectFirstScan = false; return new HttpResponseMessage(HttpStatusCode.Unauthorized); }
             if (Malformed) return Json(new JsonObject());
+            if (Locked) return Json(new JsonObject { ["verdict"] = ev["phase"]!.GetValue<string>() == "pre" ? "block" : "warn",
+                ["message"] = "AI agent is contained", ["reason_codes"] = new JsonArray("agent_contained") });
             bool blocked = ev["payload"]!.ToJsonString().Contains("DENY") && ev["phase"]!.GetValue<string>() == "pre";
             return Json(new JsonObject { ["verdict"] = blocked ? "block" : "pass", ["message"] = "policy decision",
                 ["media_gate"] = new JsonObject { ["action"] = "allow" },
@@ -65,7 +73,7 @@ public sealed class GateTests
         Assert.Equal(1, handler.Refreshes);
         Assert.Equal(handler.Events[0]["id"]!.GetValue<string>(), handler.Events[1]["id"]!.GetValue<string>());
         Assert.Equal("agent-framework", handler.Events[0]["identity"]!["agent_source"]!.GetValue<string>());
-        Assert.Equal("0.2.1", handler.Events[0]["collector"]!["version"]!.GetValue<string>());
+        Assert.Equal("0.3.0", handler.Events[0]["collector"]!["version"]!.GetValue<string>());
         Assert.Equal("turn", handler.Events[0]["session"]!["correlation_id"]!.GetValue<string>());
         Assert.Null(handler.Events[0]["payload"]!["attachments"]);
     }
@@ -175,5 +183,109 @@ public sealed class GateTests
         Assert.Empty(adapter.Sent);
         Assert.Equal(boundary != "incoming", entered);
         Assert.All(handler.Events, e => Assert.Equal("m365:msteams:tenant-1:conversation-1", e["session"]!["session_id"]!.GetValue<string>()));
+    }
+
+    private sealed class EchoChat(string reply) : IChatClient
+    {
+        public List<int> Calls { get; } = [];
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Calls.Add(messages.Count());
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, reply)));
+        }
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            foreach (var word in reply.Split(' ')) { await Task.Yield(); yield return new ChatResponseUpdate(ChatRole.Assistant, word + " "); }
+        }
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
+    private static string Text(JsonObject ev) => ev["payload"]!["text"]?.GetValue<string>() ?? "";
+    private static string Surface(JsonObject ev) => ev["payload"]!["surface"]!.GetValue<string>();
+    private static string Session(JsonObject ev) => ev["session"]!["session_id"]!.GetValue<string>();
+
+    [Fact]
+    public async Task ChatClientRecordsOnlyTheNewTurnInOneSession()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options, http);
+        using var chat = new EchoChat("the answer").AsBuilder().UseGodelGate(gate).Build();
+        using var session = GateSession.Begin("chat-1");
+        await chat.GetResponseAsync([new(ChatRole.System, "be brief"), new(ChatRole.User, "first"),
+            new(ChatRole.Assistant, "old answer"), new(ChatRole.User, "second")]);
+        Assert.Equal(["prompt", "response"], handler.Events.Select(Surface));
+        Assert.Equal("second", Text(handler.Events[0]));
+        Assert.Equal("the answer", Text(handler.Events[1]));
+        Assert.All(handler.Events, ev => Assert.Equal("chat-1", Session(ev)));
+    }
+
+    [Fact]
+    public async Task ChatClientRecordsAStreamedAnswerAndCarriesMedia()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options with { CaptureFileText = true }, http);
+        using var chat = new EchoChat("streamed text").AsBuilder().UseGodelGate(gate).Build();
+        var message = new ChatMessage(ChatRole.User, [new Microsoft.Extensions.AI.TextContent("listen"), new DataContent(new byte[] { 1, 2, 3 }, "audio/wav")]);
+        await foreach (var _ in chat.GetStreamingResponseAsync([message])) { }
+        var attachment = handler.Events[0]["payload"]!["attachments"]![0]!;
+        Assert.Equal("audio/wav", attachment["mime_type"]!.GetValue<string>());
+        Assert.Equal("AQID", attachment["content_base64"]!.GetValue<string>());
+        Assert.EndsWith(".wav", attachment["filename"]!.GetValue<string>());
+        Assert.Equal("streamed text", Text(handler.Events[1]).Trim());
+    }
+
+    [Fact]
+    public async Task ChatClientBlockStopsTheModelCall()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options, http);
+        var inner = new EchoChat("never");
+        using var chat = inner.AsBuilder().UseGodelGate(gate).Build();
+        await Assert.ThrowsAsync<GateBlockedException>(() => chat.GetResponseAsync([new(ChatRole.User, "DENY this")]));
+        Assert.Empty(inner.Calls);
+    }
+
+    [Fact]
+    public async Task KillSwitchStopsAuditModeHoldsThroughOutageAndReleases()
+    {
+        using var handler = new Handler { Locked = true };
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options with { Mode = ScanMode.Audit }, http);
+        await gate.ScanPromptAsync("queued");
+        await gate.FlushAsync(TimeSpan.FromSeconds(5));
+        Assert.True(gate.Contained);
+        await Assert.ThrowsAsync<GateAgentContainedException>(() => gate.ScanPromptAsync("next"));
+        handler.Fail = true;
+        var held = await Assert.ThrowsAsync<GateAgentContainedException>(() => gate.ScanPromptAsync("during outage"));
+        Assert.Contains("Kill Switch held", held.Message);
+        handler.Fail = false; handler.Locked = false;
+        Assert.False((await gate.ScanPromptAsync("after unlock")).Blocked);
+        Assert.False(gate.Contained);
+    }
+
+    [Fact]
+    public async Task KernelFilterScansPromptPluginAndAnswerAndBlocks()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options, http);
+        var builder = Kernel.CreateBuilder().AddGodelGate(gate);
+        builder.Services.AddSingleton<IChatCompletionService>(new EchoChat("model answer").AsChatCompletionService());
+        var kernel = builder.Build();
+        using var session = GateSession.Begin("sk-1");
+        var answer = await kernel.InvokePromptAsync("hello there");
+        Assert.Equal("model answer", answer.ToString());
+        Assert.Equal(["prompt", "response"], handler.Events.Select(Surface));
+        Assert.All(handler.Events, ev => Assert.Equal("sk-1", Session(ev)));
+        var tool = kernel.CreateFunctionFromMethod((string q) => "ran " + q, "search");
+        kernel.Plugins.AddFromFunctions("web", [tool]);
+        await kernel.InvokeAsync(kernel.Plugins["web"]["search"], new() { ["q"] = "x" });
+        Assert.Contains(handler.Events, ev => Surface(ev) == "mcp_tool");
+        await Assert.ThrowsAsync<GateBlockedException>(() => kernel.InvokePromptAsync("DENY this"));
     }
 }

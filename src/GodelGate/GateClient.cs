@@ -10,10 +10,13 @@ using System.Threading.Channels;
 
 namespace GodelGate;
 
-/// <summary>Scans against the Console; no endpoint agent is required. Transport failures fail open.</summary>
+/// <summary>Scans against the Console; no endpoint agent is required. Transport failures fail open, with
+/// one exception: a Kill Switch lock the Console reported throws GateAgentContainedException in both
+/// modes, turns audit scanning synchronous so a release is seen at once, and stays in force while the
+/// Console cannot confirm that release.</summary>
 public sealed class GateClient : IAsyncDisposable
 {
-    public const string Version = "0.2.1";
+    public const string Version = "0.3.0";
     public GateOptions Options { get; }
     private readonly HttpClient _http;
     private readonly bool _ownsHttp;
@@ -26,6 +29,10 @@ public sealed class GateClient : IAsyncDisposable
     private DateTimeOffset _expires;
     private long _retryAfter, _pending;
     private bool _disposed;
+    private volatile Decision? _lock;
+
+    /// <summary>Whether the Console last reported this agent as locked by the Kill Switch.</summary>
+    public bool Contained => _lock is not null;
 
     public GateClient(GateOptions options, HttpClient? httpClient = null)
     {
@@ -38,6 +45,8 @@ public sealed class GateClient : IAsyncDisposable
             throw new ArgumentException("ConsoleUrl must be an HTTP(S) URL without credentials.");
         Options = options;
         _http = httpClient ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+        // Edge bot filters reject clients without a user agent, and a rejected scan fails open.
+        if (_http.DefaultRequestHeaders.UserAgent.Count == 0) _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", $"ggate-dotnet-sdk/{Version}");
         _ownsHttp = httpClient is null;
         _queue = Channel.CreateBounded<JsonObject>(new BoundedChannelOptions(options.QueueCapacity) {
             SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
@@ -85,7 +94,7 @@ public sealed class GateClient : IAsyncDisposable
         options ??= new ScanOptions();
         if (!Options.Enabled) return Decision.Pass();
         var pre = !post || options.BeforeDelivery || options.Enforce;
-        var wait = options.Wait || options.Enforce || options.BeforeDelivery || (!post && Options.Mode == ScanMode.Sync);
+        var wait = options.Wait || options.Enforce || options.BeforeDelivery || (!post && Options.Mode == ScanMode.Sync) || _lock is not null;
         int redactions = 0;
         if (Options.Redact) Redact(payload, ref redactions);
         var labels = Options.Labels.ToDictionary(x => x.Key, x => x.Value);
@@ -97,7 +106,7 @@ public sealed class GateClient : IAsyncDisposable
                 ["identity"] = Wire.Node(new { org_id = Options.OrgId, user = Options.User, host = Options.Host,
                     workstation_id = Options.WorkstationId, agent_source = "agent-framework", agent_name = Options.AgentName,
                     team = Options.Team, agent_version = Version, install_source = "manual" }),
-                ["session"] = Wire.Node(new { session_id = options.SessionId ?? _session, correlation_id = options.CorrelationId,
+                ["session"] = Wire.Node(new { session_id = options.SessionId ?? GateSession.Current ?? _session, correlation_id = options.CorrelationId,
                     parent_event_id = options.ParentEventId, repo = options.Repo, source_trust = options.SourceTrust, permission_mode = options.PermissionMode }),
                 ["collector"] = Wire.Node(new { collector_id = Options.CollectorId ?? $"{Options.WorkstationId}:ggate-dotnet-sdk",
                     collector_type = "sdk", name = "ggate-dotnet-sdk", version = Version,
@@ -122,16 +131,29 @@ public sealed class GateClient : IAsyncDisposable
             }
             decision = Decision.Pass();
         }
+        if (decision.Contained && decision.Blocked) throw new GateAgentContainedException(decision);
         if (options.Enforce && decision.Blocked) throw new GateBlockedException(decision);
         return decision;
     }
 
+    /// <summary>Track the Kill Switch. Only a real Console answer can set or clear the lock.</summary>
+    private Decision Observe(Decision decision)
+    {
+        if (decision.Contained) _lock = decision;
+        else if (!decision.FailOpen) _lock = null;
+        return decision;
+    }
+
+    /// <summary>The Console gave no answer: fail open, unless a known lock has not been released.</summary>
+    private Decision Unavailable(string message) =>
+        _lock is { } held ? Decision.KillSwitchHeld(held, "the Console has not confirmed a release") : Decision.Unavailable(message);
+
     private async Task<Decision> SendAsync(JsonObject request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(Options.ConsoleUrl) || string.IsNullOrWhiteSpace(Options.ApiKey))
-            return Decision.Unavailable("GGATE_CONSOLE_URL and GGATE_API_KEY are required to scan");
+            return Unavailable("GGATE_CONSOLE_URL and GGATE_API_KEY are required to scan");
         if (DateTimeOffset.UtcNow.UtcTicks < Interlocked.Read(ref _retryAfter))
-            return Decision.Unavailable("Console unavailable (cooling down after failure)");
+            return Unavailable("Console unavailable (cooling down after failure)");
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(Options.Timeout);
         try
@@ -148,13 +170,13 @@ public sealed class GateClient : IAsyncDisposable
             else result = await ReadAsync(first, budget.Token);
             var decision = Decision.FromJson(result);
             Interlocked.Exchange(ref _retryAfter, decision.FailOpen ? (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks : 0);
-            return decision;
+            return Observe(decision);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException or InvalidOperationException)
         {
             Interlocked.Exchange(ref _retryAfter, (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks);
-            return Decision.Unavailable($"Console scan unavailable ({ex.GetType().Name})");
+            return Unavailable($"Console scan unavailable ({ex.GetType().Name})");
         }
     }
 

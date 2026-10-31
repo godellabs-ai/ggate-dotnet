@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PackageId>GodelGate.SemanticKernel</PackageId>
+    <Description>Gödel Gate filters for Semantic Kernel.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <NoWarn>$(NoWarn);SKEXP0001</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../GodelGate/GodelGate.csproj" />
+    <PackageReference Include="Microsoft.SemanticKernel.Abstractions" Version="1.81.0" />
+  </ItemGroup>
+</Project>

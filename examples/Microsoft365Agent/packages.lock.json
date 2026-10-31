@@ -297,7 +297,7 @@
       "godelgate.microsoft365": {
         "type": "Project",
         "dependencies": {
-          "GodelGate": "[0.2.1, )",
+          "GodelGate": "[0.3.0, )",
           "Microsoft.Agents.Builder": "[1.9.205, )"
         }
       }

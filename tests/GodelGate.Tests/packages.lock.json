@@ -12,6 +12,17 @@
           "Microsoft.TestPlatform.TestHost": "18.11.0"
         }
       },
+      "Microsoft.SemanticKernel.Core": {
+        "type": "Direct",
+        "requested": "[1.81.0, )",
+        "resolved": "1.81.0",
+        "contentHash": "LN1DpnA5v2Bh9LhrlWwACkpi0HRSF0ahwZVhpRHvW6ojolxuRlSDENIIVT0SEQe7vwOaT5AqR75gl3XFDAfIaQ==",
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection": "10.0.2",
+          "Microsoft.SemanticKernel.Abstractions": "1.81.0",
+          "System.Numerics.Tensors": "10.0.10"
+        }
+      },
       "xunit": {
         "type": "Direct",
         "requested": "[2.9.3, )",
@@ -157,6 +168,11 @@
         "resolved": "10.0.2",
         "contentHash": "LG9Yll3B5aNpxv0+D47g6LiOiKBIlodhcHdQwcYzo8VeexFLGqx5ymetmA2aBRyo9cCcWsQWrFsdbsr8LvmWDw=="
       },
+      "Microsoft.Bcl.HashCode": {
+        "type": "Transitive",
+        "resolved": "1.1.1",
+        "contentHash": "MalY0Y/uM/LjXtHfX/26l2VtN4LDNZ2OE3aumNOHDLsT4fNYy2hiHXI4CXCqKpNUNm7iJ2brrc4J89UdaL56FA=="
+      },
       "Microsoft.Bcl.Memory": {
         "type": "Transitive",
         "resolved": "10.0.13",
@@ -166,6 +182,31 @@
         "type": "Transitive",
         "resolved": "18.11.0",
         "contentHash": "MhN9wpvL1Es4hfIYslrsVgIsUdDFxuOBTbAl9mGIMvFo8PP5CLf4DrGdNrfwWSyn0lqi6sssm+I/qkkLL3MU+g=="
+      },
+      "Microsoft.Extensions.AI": {
+        "type": "Transitive",
+        "resolved": "10.11.0",
+        "contentHash": "PtgeWqaC3gQ8/saMgkUiwKeqCBPfDOcjfqDLcXtwJI//pu79gYZqUMPOh7/bFdFWcJihP/rWq9sgQd2xQtEP0A==",
+        "dependencies": {
+          "Microsoft.Extensions.AI.Abstractions": "10.11.0",
+          "Microsoft.Extensions.Caching.Abstractions": "10.0.13",
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.13",
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.13",
+          "System.Numerics.Tensors": "10.0.13"
+        }
+      },
+      "Microsoft.Extensions.AI.Abstractions": {
+        "type": "Transitive",
+        "resolved": "10.11.0",
+        "contentHash": "h4DX/TdJU4fk1GGaf19n6Kujkj6VXbGeL4UEOsQ8+ZJC5fVApPauokCtvBP684BYbczUYZQNfo1mbmyHG4WVSg=="
+      },
+      "Microsoft.Extensions.Caching.Abstractions": {
+        "type": "Transitive",
+        "resolved": "10.0.13",
+        "contentHash": "UOJqcdNMoFcV/5RUcOlVKq9pPmbrcmbpLx5iYz9QtrmMcWRQzlL5Q/NZRfbPPLNyIEc1HWjjs5Z7nIwqewU1sg==",
+        "dependencies": {
+          "Microsoft.Extensions.Primitives": "10.0.13"
+        }
       },
       "Microsoft.Extensions.Configuration": {
         "type": "Transitive",
@@ -302,6 +343,14 @@
         "resolved": "10.0.13",
         "contentHash": "ZjTwxzhiw2TMEzIbUDkMF0dfDB2I4NQgIfKD0ELu9/5Mk+SRGdKZcD0/lvBrRCAPo6KN2r0BW86MRancoyJkoA=="
       },
+      "Microsoft.Extensions.VectorData.Abstractions": {
+        "type": "Transitive",
+        "resolved": "10.5.2",
+        "contentHash": "yDAXNuIO0zXl6zkDqUvTN3rynut0m1bBoWo3ylZQ/B510hGjnRO7cQIs/iGvT3tuxyOL1oKAAONidXH495hZzQ==",
+        "dependencies": {
+          "Microsoft.Extensions.AI.Abstractions": "10.5.2"
+        }
+      },
       "Microsoft.Identity.Client": {
         "type": "Transitive",
         "resolved": "4.83.1",
@@ -348,6 +397,16 @@
           "Microsoft.Bcl.Cryptography": "10.0.2",
           "Microsoft.Extensions.Logging.Abstractions": "8.0.0",
           "Microsoft.IdentityModel.Logging": "8.22.0"
+        }
+      },
+      "Microsoft.SemanticKernel.Abstractions": {
+        "type": "Transitive",
+        "resolved": "1.81.0",
+        "contentHash": "IE6Nx6O+7F5t4WpASv/fRg7S2t5BbZwBH1a90cnXktVyItKtPwEZl8uxdlDwavF5lYwcQJxWZ9fYJIPDKQCkPQ==",
+        "dependencies": {
+          "Microsoft.Bcl.HashCode": "1.1.1",
+          "Microsoft.Extensions.AI": "10.5.0",
+          "Microsoft.Extensions.VectorData.Abstractions": "10.5.2"
         }
       },
       "Microsoft.TestPlatform.ObjectModel": {
@@ -407,6 +466,11 @@
         "resolved": "10.0.13",
         "contentHash": "+cqCf2WzTIhd66zCTvJOk40KV3xjcAxCyM/aMlgpmGKpG2Q5TL1I6gywbHyGDd1b10wKrz/Aao1/z+YKolVoDA=="
       },
+      "System.Numerics.Tensors": {
+        "type": "Transitive",
+        "resolved": "10.0.13",
+        "contentHash": "E4JC7KcY4j1yx9uy8tVsHlGThnwLdUWtUz6aLHCqbN/jbtwbwbZgnVEF9atUr/7ynFCbo8Rbij056Y9bWM9ALg=="
+      },
       "System.Runtime.Caching": {
         "type": "Transitive",
         "resolved": "10.0.13",
@@ -463,11 +527,25 @@
       "godelgate": {
         "type": "Project"
       },
+      "godelgate.ai": {
+        "type": "Project",
+        "dependencies": {
+          "GodelGate": "[0.3.0, )",
+          "Microsoft.Extensions.AI": "[10.11.0, )"
+        }
+      },
       "godelgate.microsoft365": {
         "type": "Project",
         "dependencies": {
-          "GodelGate": "[0.2.1, )",
+          "GodelGate": "[0.3.0, )",
           "Microsoft.Agents.Builder": "[1.9.205, )"
+        }
+      },
+      "godelgate.semantickernel": {
+        "type": "Project",
+        "dependencies": {
+          "GodelGate": "[0.3.0, )",
+          "Microsoft.SemanticKernel.Abstractions": "[1.81.0, )"
         }
       }
     }

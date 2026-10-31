@@ -1,6 +1,6 @@
 # Gödel Gate .NET SDK
 
-Version 0.2.1. Compatible with Gödel Gate Console 0.2.x. Targets .NET 8 and .NET 10.
+Version 0.3.0. Compatible with Gödel Gate Console 0.2.x. Targets .NET 8 and .NET 10.
 The core package has no third-party runtime dependencies. The optional Microsoft 365 package
 uses Microsoft's public middleware contract. See the example and validation instructions below.
 
@@ -34,6 +34,39 @@ by default. Explicit enforcement overrides audit mode.
 `Decision` preserves the full JSON response, including detector evidence, policy source,
 document intelligence, `PipelineStatus`, and `MediaGate`. These metadata fields do not replace
 the security verdict. `hard_block` from older Consoles is treated as `block`.
+
+## Sessions and the Kill Switch
+
+```csharp
+using (GateSession.Begin(conversationId)) // one conversation, one Console session
+    answer = await RunAgentAsync(text);
+```
+
+A Console lock throws `GateAgentContainedException` (a `GateBlockedException`) in `Sync` and `Audit`
+mode, even without `Enforce`. In `Audit` mode the first queued verdict turns scanning synchronous, so an
+unlock is seen at the next scan. A known lock stays in force while the Console cannot confirm its
+release; an outage with no lock still fails open. `GateClient.Contained` reports the state.
+
+Set `CaptureFileText` (or `GGATE_CAPTURE_FILE_TEXT=1`) to send content for scanning.
+`Attachment.FromPathAsync` and `Attachment.FromBytes` cover files, images, audio, and video.
+
+## Microsoft.Extensions.AI
+
+Reference `src/GodelGate.AI/GodelGate.AI.csproj`. Keep the Gate client next to the model so each tool
+step is seen:
+
+```csharp
+IChatClient chat = provider.AsBuilder().UseFunctionInvocation().UseGodelGate(gate).Build();
+```
+
+Each call scans the newest user message with its `DataContent` images and audio, tool calls before they
+run, tool results, and the answer. Streamed text is scanned when the stream ends and cannot be recalled.
+
+## Semantic Kernel
+
+Reference `src/GodelGate.SemanticKernel/GodelGate.SemanticKernel.csproj`, then
+`builder.AddGodelGate(gate)` on the `IKernelBuilder`. Filters cover calls through the `Kernel`. A direct
+`IChatCompletionService` call bypasses them; wrap its `IChatClient` with `GodelGate.AI` instead.
 
 ## Microsoft 365 Agents
 

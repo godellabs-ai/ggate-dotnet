@@ -13,7 +13,9 @@ public sealed record GateOptions
     public string? ApiKey { get; init; } = Environment.GetEnvironmentVariable("GGATE_API_KEY");
     public string OrgId { get; init; } = Environment.GetEnvironmentVariable("GGATE_ORG_ID") ?? "local";
     public string Host { get; init; } = Environment.MachineName;
-    public string? User { get; init; } = Environment.GetEnvironmentVariable("GGATE_USER");
+    /// <summary>Seat identity, as the Python and Node SDKs resolve it. Kill Switch locks match on it.</summary>
+    public string? User { get; init; } = Environment.GetEnvironmentVariable("GGATE_USER")
+        ?? Environment.GetEnvironmentVariable("GGATE_USER_EMAIL") ?? $"{Environment.UserName}@{Environment.MachineName}";
     public string WorkstationId { get; init; } = Environment.GetEnvironmentVariable("GGATE_WORKSTATION_ID") ?? Environment.MachineName;
     public string? CollectorId { get; init; } = Environment.GetEnvironmentVariable("GGATE_COLLECTOR_ID");
     public ScanMode Mode { get; init; } = Environment.GetEnvironmentVariable("GGATE_MODE") == "async" ? ScanMode.Audit : ScanMode.Sync;
@@ -21,6 +23,9 @@ public sealed record GateOptions
     public TimeSpan Cooldown { get; init; } = TimeSpan.FromSeconds(30);
     public int QueueCapacity { get; init; } = 1024;
     public bool Redact { get; init; } = Environment.GetEnvironmentVariable("GGATE_REDACT") == "1";
+    /// <summary>Send file and media content for scanning. Off, the Console only sees metadata.</summary>
+    public bool CaptureFileText { get; init; } = Environment.GetEnvironmentVariable("GGATE_CAPTURE_FILE_TEXT") == "1";
+    public int MaxFileBytes { get; init; } = int.TryParse(Environment.GetEnvironmentVariable("GGATE_MAX_FILE_BYTES"), out var bytes) ? bytes : 65536;
     public bool Enabled { get; init; } = Environment.GetEnvironmentVariable("GGATE_DISABLED") != "1";
     public IReadOnlyDictionary<string, string> Labels { get; init; } = new Dictionary<string, string>();
 }
@@ -72,6 +77,15 @@ public sealed record Attachment
     public string? ContentBase64 { get; init; }
     public bool Truncated { get; init; }
 
+    private static readonly Dictionary<string, string> MimeTypes = new(StringComparer.OrdinalIgnoreCase) {
+        [".txt"] = "text/plain", [".md"] = "text/markdown", [".csv"] = "text/csv", [".html"] = "text/html", [".json"] = "application/json",
+        [".pdf"] = "application/pdf", [".png"] = "image/png", [".jpg"] = "image/jpeg", [".jpeg"] = "image/jpeg", [".gif"] = "image/gif",
+        [".webp"] = "image/webp", [".wav"] = "audio/wav", [".mp3"] = "audio/mpeg", [".m4a"] = "audio/mp4", [".ogg"] = "audio/ogg",
+        [".flac"] = "audio/flac", [".mp4"] = "video/mp4", [".mov"] = "video/quicktime", [".webm"] = "video/webm",
+        [".docx"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        [".xlsx"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        [".pptx"] = "application/vnd.openxmlformats-officedocument.presentationml.presentation" };
+
     public static async Task<Attachment> FromPathAsync(string path, bool captureContent = false,
         int maxBytes = 65536, CancellationToken cancellationToken = default)
     {
@@ -79,17 +93,59 @@ public sealed record Attachment
         await using var file = File.OpenRead(path);
         var hash = await System.Security.Cryptography.SHA256.HashDataAsync(file, cancellationToken);
         file.Position = 0;
+        var mime = MimeTypes.GetValueOrDefault(Path.GetExtension(path));
         byte[]? content = null;
         if (captureContent)
         {
             content = new byte[(int)Math.Min(file.Length, maxBytes)];
             await file.ReadExactlyAsync(content, cancellationToken);
         }
-        return new Attachment { Filename = Path.GetFileName(path), Size = file.Length,
+        return WithContent(new Attachment { Filename = Path.GetFileName(path), MimeType = mime, Size = file.Length,
             Sha256 = Convert.ToHexString(hash).ToLowerInvariant(), Source = "file_ref",
-            Capture = captureContent ? "content" : "metadata_only",
-            ContentBase64 = content is null ? null : Convert.ToBase64String(content),
-            Truncated = captureContent && file.Length > maxBytes };
+            Truncated = captureContent && file.Length > maxBytes }, content);
+    }
+
+    /// <summary>An attachment for in-memory content: an upload, or a framework's image or audio data.</summary>
+    public static Attachment FromBytes(ReadOnlySpan<byte> data, string? mimeType = null, string? filename = null,
+        bool captureContent = false, int maxBytes = 65536, string source = "upload")
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        mimeType ??= filename is null ? null : MimeTypes.GetValueOrDefault(Path.GetExtension(filename));
+        // Always name the file with an extension: Console file-type policies match on it.
+        if (mimeType is not null && (filename is null || !Path.HasExtension(filename)))
+            filename = (filename ?? "attachment") + (MimeTypes.FirstOrDefault(x => x.Value == mimeType).Key ?? "");
+        var bounded = data[..Math.Min(data.Length, maxBytes)];
+        return WithContent(new Attachment { Filename = filename, MimeType = mimeType, Size = data.Length, Source = source,
+            Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)).ToLowerInvariant(),
+            Truncated = captureContent && data.Length > maxBytes }, captureContent ? bounded.ToArray() : null);
+    }
+
+    private static Attachment WithContent(Attachment attachment, byte[]? content)
+    {
+        if (content is null) return attachment;
+        return attachment.MimeType?.StartsWith("text/", StringComparison.Ordinal) == true
+            ? attachment with { Capture = "text", Text = System.Text.Encoding.UTF8.GetString(content) }
+            : attachment with { Capture = "content", ContentBase64 = Convert.ToBase64String(content) };
+    }
+}
+
+/// <summary>One conversation: every scan in this scope, across adapters and awaits, joins one session.</summary>
+public static class GateSession
+{
+    private static readonly AsyncLocal<string?> Bound = new();
+    public static string? Current => Bound.Value;
+
+    /// <summary>Pass the app's conversation id so it stays one session across requests.</summary>
+    public static IDisposable Begin(string? sessionId = null)
+    {
+        var previous = Bound.Value;
+        Bound.Value = sessionId ?? "dotnet-sdk-" + Guid.NewGuid();
+        return new Scope(previous);
+    }
+
+    private sealed class Scope(string? previous) : IDisposable
+    {
+        public void Dispose() => Bound.Value = previous;
     }
 }
 
@@ -101,6 +157,8 @@ public sealed class Decision
     public bool Blocked => Verdict == "block";
     public bool Allowed => !Blocked;
     public bool FailOpen => Raw["fail_open"]?.GetValue<bool>() ?? false;
+    /// <summary>The Kill Switch has locked this agent. Also true on a warn for an already delivered event.</summary>
+    public bool Contained => Raw["reason_codes"] is JsonArray codes && codes.Any(code => code?.GetValue<string>() == "agent_contained");
     public JsonNode? ReasonCodes => Raw["reason_codes"];
     public JsonNode? MatchedDetectors => Raw["matched_detectors"];
     public JsonNode? PolicySource => Raw["policy_source"];
@@ -120,15 +178,26 @@ public sealed class Decision
         return new Decision((JsonObject)raw.DeepClone(), verdict);
     }
     public static Decision Pass() => new(new JsonObject { ["verdict"] = "pass", ["message"] = "allowed" }, "pass");
+    /// <summary>Keep a known lock in force while the Console cannot confirm its release.</summary>
+    public static Decision KillSwitchHeld(Decision last, string reason)
+    {
+        var raw = (JsonObject)last.Raw.DeepClone();
+        raw["verdict"] = "block"; raw["fail_open"] = false; raw["message"] = $"{last.Message} (Kill Switch held: {reason})";
+        ((JsonArray)raw["reason_codes"]!).Add("kill_switch_held");
+        return new Decision(raw, "block");
+    }
     public static Decision Unavailable(string message) => new(new JsonObject {
         ["verdict"] = "pass", ["message"] = message, ["fail_open"] = true,
         ["reason_codes"] = new JsonArray("engine_unreachable") }, "pass");
 }
 
-public sealed class GateBlockedException(Decision decision) : Exception(decision.Message)
+public class GateBlockedException(Decision decision) : Exception(decision.Message)
 {
     public Decision Decision { get; } = decision;
 }
+
+/// <summary>The Kill Switch has locked this agent. Thrown even without Enforce, including in audit mode.</summary>
+public sealed class GateAgentContainedException(Decision decision) : GateBlockedException(decision);
 
 internal static class Wire
 {

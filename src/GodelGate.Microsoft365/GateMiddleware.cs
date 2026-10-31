@@ -18,7 +18,7 @@ public sealed class GateMiddleware(GateClient client) : IMiddleware
         var turn = activity.Id ?? Guid.NewGuid().ToString();
         return new ScanOptions {
             Framework = "microsoft-365-agents",
-            SessionId = $"m365:{activity.ChannelId}:{activity.Conversation?.TenantId}:{activity.Conversation?.Id ?? turn}",
+            SessionId = GateSession.Current ?? $"m365:{activity.ChannelId}:{activity.Conversation?.TenantId}:{activity.Conversation?.Id ?? turn}",
             ConversationId = activity.Conversation?.Id, CorrelationId = turn, RequestId = turn,
             SourceDetail = new JsonObject { ["channel_id"] = activity.ChannelId?.ToString(),
                 ["tenant_id"] = activity.Conversation?.TenantId, ["activity_type"] = activity.Type,

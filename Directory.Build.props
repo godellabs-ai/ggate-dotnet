@@ -3,7 +3,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <Version>0.2.1</Version>
+    <Version>0.3.0</Version>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
