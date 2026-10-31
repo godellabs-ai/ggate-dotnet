@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/GodelGate.Microsoft365/GodelGate.Microsoft365.csproj" />
     <ProjectReference Include="../../src/GodelGate.AI/GodelGate.AI.csproj" />
+    <ProjectReference Include="../../src/GodelGate.AutoGen/GodelGate.AutoGen.csproj" />
     <ProjectReference Include="../../src/GodelGate.SemanticKernel/GodelGate.SemanticKernel.csproj" />
     <PackageReference Include="Microsoft.SemanticKernel.Core" Version="1.81.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />

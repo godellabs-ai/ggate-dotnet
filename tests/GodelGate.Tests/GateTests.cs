@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
+using AutoGen.Core;
 using GodelGate.AI;
+using GodelGate.AutoGen;
 using GodelGate.Microsoft365;
 using GodelGate.SemanticKernel;
 using Microsoft.Extensions.AI;
@@ -202,6 +204,25 @@ public sealed class GateTests
         public void Dispose() { }
     }
 
+    private sealed class FakeAgent(IMessage reply) : IStreamingAgent
+    {
+        public string Name => "fake";
+        public int Calls;
+        public Task<IMessage> GenerateReplyAsync(IEnumerable<IMessage> messages, GenerateReplyOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(reply);
+        }
+        public async IAsyncEnumerable<IMessage> GenerateStreamingReplyAsync(IEnumerable<IMessage> messages, GenerateReplyOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            await Task.Yield();
+            yield return new TextMessageUpdate(Role.Assistant, "streamed ", "fake");
+            yield return new TextMessageUpdate(Role.Assistant, "reply", "fake");
+        }
+    }
+
     private static string Text(JsonObject ev) => ev["payload"]!["text"]?.GetValue<string>() ?? "";
     private static string Surface(JsonObject ev) => ev["payload"]!["surface"]!.GetValue<string>();
     private static string Session(JsonObject ev) => ev["session"]!["session_id"]!.GetValue<string>();
@@ -287,5 +308,61 @@ public sealed class GateTests
         await kernel.InvokeAsync(kernel.Plugins["web"]["search"], new() { ["q"] = "x" });
         Assert.Contains(handler.Events, ev => Surface(ev) == "mcp_tool");
         await Assert.ThrowsAsync<GateBlockedException>(() => kernel.InvokePromptAsync("DENY this"));
+    }
+
+    [Fact]
+    public async Task AutoGenRecordsOnlyTheNewTurnInOneSession()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options, http);
+        var agent = new FakeAgent(new TextMessage(Role.Assistant, "the answer", "fake")).RegisterGodelGate(gate);
+        using var session = GateSession.Begin("autogen-1");
+        await agent.GenerateReplyAsync([new TextMessage(Role.User, "first"), new TextMessage(Role.Assistant, "old answer"), new TextMessage(Role.User, "second")]);
+        Assert.Equal(["prompt", "response"], handler.Events.Select(Surface));
+        Assert.Equal("second", Text(handler.Events[0]));
+        Assert.Equal("the answer", Text(handler.Events[1]));
+        Assert.All(handler.Events, ev => Assert.Equal("autogen-1", Session(ev)));
+    }
+
+    [Fact]
+    public async Task AutoGenBlockStopsTheAgentAndToolCallsAreScanned()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options, http);
+        var inner = new FakeAgent(new ToolCallMessage([new ToolCall("search", "{}")], "fake"));
+        var agent = inner.RegisterGodelGate(gate);
+        await Assert.ThrowsAsync<GateBlockedException>(() => agent.GenerateReplyAsync([new TextMessage(Role.User, "DENY this")]));
+        Assert.Equal(0, inner.Calls);
+        await agent.GenerateReplyAsync([new TextMessage(Role.User, "fine")]);
+        Assert.Contains(handler.Events, ev => Surface(ev) == "mcp_tool");
+    }
+
+    [Fact]
+    public async Task AutoGenStreamIsRecordedAndImagesAttach()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options with { CaptureFileText = true }, http);
+        var agent = new FakeAgent(new TextMessage(Role.Assistant, "x", "fake")).RegisterGodelGate(gate);
+        var image = new ImageMessage(Role.User, BinaryData.FromBytes(new byte[] { 1, 2, 3 }, "image/png"));
+        var message = new MultiModalMessage(Role.User, [new TextMessage(Role.User, "look"), image]);
+        await foreach (var _ in agent.GenerateStreamingReplyAsync([message])) { }
+        Assert.Equal("look", Text(handler.Events[0]));
+        Assert.Equal("AQID", handler.Events[0]["payload"]!["attachments"]![0]!["content_base64"]!.GetValue<string>());
+        Assert.Equal("streamed reply", Text(handler.Events[1]));
+    }
+
+    [Fact]
+    public async Task AutoGenKillSwitchStopsTheAgent()
+    {
+        using var handler = new Handler { Locked = true };
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options, http);
+        var inner = new FakeAgent(new TextMessage(Role.Assistant, "never", "fake"));
+        var agent = inner.RegisterGodelGate(gate);
+        await Assert.ThrowsAsync<GateAgentContainedException>(() => agent.GenerateReplyAsync([new TextMessage(Role.User, "hello")]));
+        Assert.Equal(0, inner.Calls);
     }
 }

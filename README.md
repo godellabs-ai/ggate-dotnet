@@ -6,7 +6,8 @@ uses Microsoft's public middleware contract. See the example and validation inst
 
 ## Use the SDK
 
-These are local source packages; they have not been published to NuGet. Reference
+These are local source packages; they have not been published to NuGet. Clone this repository beside
+your project, not inside it, because a project compiles every `.cs` file beneath it. Reference
 `src/GodelGate/GodelGate.csproj` from your application, or build the local packages with `dotnet pack`.
 
 ```csharp
@@ -61,6 +62,28 @@ IChatClient chat = provider.AsBuilder().UseFunctionInvocation().UseGodelGate(gat
 
 Each call scans the newest user message with its `DataContent` images and audio, tool calls before they
 run, tool results, and the answer. Streamed text is scanned when the stream ends and cannot be recalled.
+
+OpenAI's .NET client works the same way, and so does Microsoft Agent Framework, which accepts the built
+`IChatClient`:
+
+```csharp
+IChatClient chat = new OpenAIClient(key).GetChatClient("gpt-4o").AsIChatClient()
+    .AsBuilder().UseFunctionInvocation().UseGodelGate(gate, "openai-assistants", "openai").Build();
+var agent = new ChatClientAgent(chat, "You are helpful.", "assistant");
+```
+
+## AutoGen
+
+Reference `src/GodelGate.AutoGen/GodelGate.AutoGen.csproj`. Built on `AutoGen.Core` 0.2.3. Add Gate after the
+message connector and before any `FunctionCallMiddleware`, so tool calls are scanned before they run:
+
+```csharp
+var agent = new OpenAIChatAgent(client, "assistant", "You are helpful.")
+    .RegisterMessageConnector()
+    .RegisterGodelGate(gate);
+```
+
+Register every agent in a group chat. Streamed text is scanned when the stream ends and cannot be recalled.
 
 ## Semantic Kernel
 
@@ -122,6 +145,9 @@ dotnet restore GodelGate.slnx --locked-mode
 dotnet test GodelGate.slnx -c Release
 dotnet pack src/GodelGate/GodelGate.csproj -c Release -o artifacts
 dotnet pack src/GodelGate.Microsoft365/GodelGate.Microsoft365.csproj -c Release -o artifacts
+dotnet pack src/GodelGate.AI/GodelGate.AI.csproj -c Release -o artifacts
+dotnet pack src/GodelGate.AutoGen/GodelGate.AutoGen.csproj -c Release -o artifacts
+dotnet pack src/GodelGate.SemanticKernel/GodelGate.SemanticKernel.csproj -c Release -o artifacts
 ```
 
 Tests simulate the Console's HTTP contract and use Microsoft's real TurnContext for middleware

@@ -6,6 +6,7 @@
     <Project Path="src/GodelGate.Microsoft365/GodelGate.Microsoft365.csproj" />
     <Project Path="src/GodelGate/GodelGate.csproj" />
     <Project Path="src/GodelGate.AI/GodelGate.AI.csproj" />
+    <Project Path="src/GodelGate.AutoGen/GodelGate.AutoGen.csproj" />
     <Project Path="src/GodelGate.SemanticKernel/GodelGate.SemanticKernel.csproj" />
   </Folder>
   <Folder Name="/tests/">
