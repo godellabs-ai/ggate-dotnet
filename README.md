@@ -38,6 +38,51 @@ the security verdict. `hard_block` from older Consoles is treated as `block`.
 
 ## Sessions and the Kill Switch
 
+### AI access rules and application users
+
+The Console's **Policies → Authorised AI** access rules apply to SDK scans. Select the named
+application (`AgentName`), its framework, or all supported agents. The Console resolves users,
+groups, and user tags from its endpoint directory. `Team` describes workload ownership; it does
+not grant directory group membership.
+
+In a shared application, bind the authenticated user's endpoint email or directory alias for the
+whole request. Use a value verified by your server's authentication layer, never an identity
+supplied directly in a prompt or request body:
+
+```csharp
+using (GateUser.Begin(authenticatedUserEmail))
+using (GateSession.Begin(conversationId))
+{
+    var scan = new ScanOptions { Framework = "microsoft-extensions-ai", Enforce = true };
+    await gate.ScanPromptAsync(prompt, scan); // A block throws GateBlockedException, including in Audit mode.
+    var answer = await RunAgentAsync(prompt);
+    await gate.ScanResponseAsync(answer, scan);
+    // Deliver only after the final scan returns.
+}
+```
+
+`GateUser.Begin` follows async calls and instrumented adapters and restores the previous identity
+on disposal. An explicitly assigned `ScanOptions.User` overrides the scope; the scope overrides
+`GateOptions.User` / `GGATE_USER`. Explicit `null` or blank means anonymous and clears the fallback.
+Set it explicitly for unauthenticated requests. Without an override, existing single-user/service
+deployments keep their configured identity.
+
+Block rules prevent operations only when scans run before the operation with `Enforce = true`,
+or the application checks the returned verdict. Adapter enforcement follows `ScanMode.Sync`.
+Audit calls cannot prevent an operation already performed. Warn remains an allowed decision for
+the application to present; `Decision.PolicySource` and `Decision.MatchedPolicies` retain policy
+IDs and names, including Monitor matches. Ordinary access blocks are evaluated again at the next
+scan. Cached Kill Switch locks are separate per user and framework; `GateClient.Contained` means
+at least one such lock is known.
+
+SDK API keys do not establish a human provider login or subscription plan. Approved **provider
+account domains** and observed plan tags come from coding-agent/browser collectors. SDK access
+rules use the endpoint user's Console identity and existing directory tags; the SDK does not
+claim provider email, plan, groups, or tags from request metadata. Existing transport fail-open
+behavior is unchanged; applications requiring fail-closed preflight must also check `Decision.FailOpen`.
+
+### Conversation sessions
+
 ```csharp
 using (GateSession.Begin(conversationId)) // one conversation, one Console session
     answer = await RunAgentAsync(text);

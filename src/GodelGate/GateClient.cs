@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -29,10 +30,10 @@ public sealed class GateClient : IAsyncDisposable
     private DateTimeOffset _expires;
     private long _retryAfter, _pending;
     private bool _disposed;
-    private volatile Decision? _lock;
+    private readonly ConcurrentDictionary<(string? User, string Framework), Decision> _locks = new();
 
-    /// <summary>Whether the Console last reported this agent as locked by the Kill Switch.</summary>
-    public bool Contained => _lock is not null;
+    /// <summary>Whether any user/framework on this client has a known Kill Switch lock.</summary>
+    public bool Contained => !_locks.IsEmpty;
 
     public GateClient(GateOptions options, HttpClient? httpClient = null)
     {
@@ -93,8 +94,10 @@ public sealed class GateClient : IAsyncDisposable
         ct.ThrowIfCancellationRequested();
         options ??= new ScanOptions();
         if (!Options.Enabled) return Decision.Pass();
+        var user = options.HasUser ? GateUser.Normalize(options.User) : GateUser.Resolve(Options.User);
+        var subject = Subject(user, options.Framework);
         var pre = !post || options.BeforeDelivery || options.Enforce;
-        var wait = options.Wait || options.Enforce || options.BeforeDelivery || (!post && Options.Mode == ScanMode.Sync) || _lock is not null;
+        var wait = options.Wait || options.Enforce || options.BeforeDelivery || (!post && Options.Mode == ScanMode.Sync) || _locks.ContainsKey(subject);
         int redactions = 0;
         if (Options.Redact) Redact(payload, ref redactions);
         var labels = Options.Labels.ToDictionary(x => x.Key, x => x.Value);
@@ -103,7 +106,7 @@ public sealed class GateClient : IAsyncDisposable
             ["event"] = new JsonObject {
                 ["id"] = Guid.NewGuid().ToString(), ["timestamp"] = DateTimeOffset.UtcNow.ToString("O"),
                 ["phase"] = pre ? "pre" : "post",
-                ["identity"] = Wire.Node(new { org_id = Options.OrgId, user = Options.User, host = Options.Host,
+                ["identity"] = Wire.Node(new { org_id = Options.OrgId, user, host = Options.Host,
                     workstation_id = Options.WorkstationId, agent_source = "agent-framework", agent_name = Options.AgentName,
                     team = Options.Team, agent_version = Version, install_source = "manual" }),
                 ["session"] = Wire.Node(new { session_id = options.SessionId ?? GateSession.Current ?? _session, correlation_id = options.CorrelationId,
@@ -137,23 +140,29 @@ public sealed class GateClient : IAsyncDisposable
     }
 
     /// <summary>Track the Kill Switch. Only a real Console answer can set or clear the lock.</summary>
-    private Decision Observe(Decision decision)
+    private Decision Observe(Decision decision, (string? User, string Framework) subject)
     {
-        if (decision.Contained) _lock = decision;
-        else if (!decision.FailOpen) _lock = null;
+        if (decision.Contained) _locks[subject] = decision;
+        else if (!decision.FailOpen) _locks.TryRemove(subject, out _);
         return decision;
     }
 
     /// <summary>The Console gave no answer: fail open, unless a known lock has not been released.</summary>
-    private Decision Unavailable(string message) =>
-        _lock is { } held ? Decision.KillSwitchHeld(held, "the Console has not confirmed a release") : Decision.Unavailable(message);
+    private Decision Unavailable(string message, (string? User, string Framework) subject) =>
+        _locks.TryGetValue(subject, out var held) ? Decision.KillSwitchHeld(held, "the Console has not confirmed a release") : Decision.Unavailable(message);
+
+    private static (string? User, string Framework) Subject(string? user, string framework) =>
+        (user?.Trim().ToLowerInvariant(), Regex.Replace(framework.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim('-'));
 
     private async Task<Decision> SendAsync(JsonObject request, CancellationToken ct)
     {
+        // Read queued identity from the event, never from the queue worker's ambient context.
+        var subject = Subject(request["event"]!["identity"]!["user"]?.GetValue<string>(),
+            request["event"]!["source"]!["client"]!.GetValue<string>());
         if (string.IsNullOrWhiteSpace(Options.ConsoleUrl) || string.IsNullOrWhiteSpace(Options.ApiKey))
-            return Unavailable("GGATE_CONSOLE_URL and GGATE_API_KEY are required to scan");
+            return Unavailable("GGATE_CONSOLE_URL and GGATE_API_KEY are required to scan", subject);
         if (DateTimeOffset.UtcNow.UtcTicks < Interlocked.Read(ref _retryAfter))
-            return Unavailable("Console unavailable (cooling down after failure)");
+            return Unavailable("Console unavailable (cooling down after failure)", subject);
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(Options.Timeout);
         try
@@ -170,13 +179,13 @@ public sealed class GateClient : IAsyncDisposable
             else result = await ReadAsync(first, budget.Token);
             var decision = Decision.FromJson(result);
             Interlocked.Exchange(ref _retryAfter, decision.FailOpen ? (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks : 0);
-            return Observe(decision);
+            return Observe(decision, subject);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException or InvalidOperationException)
         {
             Interlocked.Exchange(ref _retryAfter, (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks);
-            return Unavailable($"Console scan unavailable ({ex.GetType().Name})");
+            return Unavailable($"Console scan unavailable ({ex.GetType().Name})", subject);
         }
     }
 

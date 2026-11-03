@@ -13,7 +13,7 @@ public sealed record GateOptions
     public string? ApiKey { get; init; } = Environment.GetEnvironmentVariable("GGATE_API_KEY");
     public string OrgId { get; init; } = Environment.GetEnvironmentVariable("GGATE_ORG_ID") ?? "local";
     public string Host { get; init; } = Environment.MachineName;
-    /// <summary>Seat identity, as the Python and Node SDKs resolve it. Kill Switch locks match on it.</summary>
+    /// <summary>Default endpoint identity for access rules and Kill Switch locks. Override per request with GateUser.</summary>
     public string? User { get; init; } = Environment.GetEnvironmentVariable("GGATE_USER")
         ?? Environment.GetEnvironmentVariable("GGATE_USER_EMAIL") ?? $"{Environment.UserName}@{Environment.MachineName}";
     public string WorkstationId { get; init; } = Environment.GetEnvironmentVariable("GGATE_WORKSTATION_ID") ?? Environment.MachineName;
@@ -32,6 +32,10 @@ public sealed record GateOptions
 
 public sealed record ScanOptions
 {
+    private string? _user;
+    /// <summary>Server-verified endpoint identity. Explicit null/blank clears the scoped or configured user.</summary>
+    public string? User { get => _user; init { _user = value; HasUser = true; } }
+    internal bool HasUser { get; private init; }
     public string Framework { get; init; } = "generic";
     public string? Provider { get; init; }
     public string? Model { get; init; }
@@ -149,6 +153,30 @@ public static class GateSession
     }
 }
 
+/// <summary>Bind a server-verified endpoint user to every scan and adapter call across awaits.</summary>
+public static class GateUser
+{
+    private sealed record Identity(string? User);
+    private static readonly AsyncLocal<Identity?> Bound = new();
+    public static string? Current => Bound.Value?.User;
+
+    /// <summary>A null or blank identity explicitly means anonymous, never the configured service user.</summary>
+    public static IDisposable Begin(string? user)
+    {
+        var previous = Bound.Value;
+        Bound.Value = new Identity(Normalize(user));
+        return new Scope(previous);
+    }
+
+    internal static string? Normalize(string? user) => string.IsNullOrWhiteSpace(user) ? null : user.Trim();
+    internal static string? Resolve(string? fallback) => Bound.Value is { } identity ? identity.User : Normalize(fallback);
+
+    private sealed class Scope(Identity? previous) : IDisposable
+    {
+        public void Dispose() => Bound.Value = previous;
+    }
+}
+
 public sealed class Decision
 {
     public JsonObject Raw { get; }
@@ -162,6 +190,7 @@ public sealed class Decision
     public JsonNode? ReasonCodes => Raw["reason_codes"];
     public JsonNode? MatchedDetectors => Raw["matched_detectors"];
     public JsonNode? PolicySource => Raw["policy_source"];
+    public JsonNode? MatchedPolicies => Raw["matched_policies"];
     public JsonNode? Detection => Raw["detection"];
     public JsonNode? DocumentIntelligence => Raw["document_intelligence"];
     public JsonNode? PipelineStatus => Raw["pipeline_status"];
