@@ -1,10 +1,17 @@
 # Gödel Gate .NET SDK
 
-Version 0.3.0. Compatible with Gödel Gate Console 0.2.x. Targets .NET 8 and .NET 10.
+Version 0.3.0, released with Gödel Gate Console 0.3.0. Targets .NET 8 and .NET 10.
 The core package has no third-party runtime dependencies. The optional Microsoft 365 package
 uses Microsoft's public middleware contract. See the example and validation instructions below.
 
 ## Use the SDK
+
+Pin the release selected by your Console. The versioned GitHub release contains the source and
+NuGet package files for a local feed; it does not follow changes on `main`.
+
+```sh
+git clone --branch v0.3.0 --depth 1 https://github.com/godellabs-ai/ggate-dotnet.git ../ggate-dotnet
+```
 
 These are local source packages; they have not been published to NuGet. Clone this repository beside
 your project, not inside it, because a project compiles every `.cs` file beneath it. Reference
