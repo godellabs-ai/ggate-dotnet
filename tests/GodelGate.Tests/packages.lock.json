@@ -576,7 +576,7 @@
       "godelgate.ai": {
         "type": "Project",
         "dependencies": {
-          "GodelGate": "[0.3.0, )",
+          "GodelGate": "[0.3.1, )",
           "Microsoft.Extensions.AI": "[10.11.0, )"
         }
       },
@@ -584,20 +584,20 @@
         "type": "Project",
         "dependencies": {
           "AutoGen.Core": "[0.2.3, )",
-          "GodelGate": "[0.3.0, )"
+          "GodelGate": "[0.3.1, )"
         }
       },
       "godelgate.microsoft365": {
         "type": "Project",
         "dependencies": {
-          "GodelGate": "[0.3.0, )",
+          "GodelGate": "[0.3.1, )",
           "Microsoft.Agents.Builder": "[1.9.205, )"
         }
       },
       "godelgate.semantickernel": {
         "type": "Project",
         "dependencies": {
-          "GodelGate": "[0.3.0, )",
+          "GodelGate": "[0.3.1, )",
           "Microsoft.SemanticKernel.Abstractions": "[1.81.0, )"
         }
       }

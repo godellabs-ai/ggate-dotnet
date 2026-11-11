@@ -75,7 +75,7 @@ public sealed class GateTests
         Assert.Equal(1, handler.Refreshes);
         Assert.Equal(handler.Events[0]["id"]!.GetValue<string>(), handler.Events[1]["id"]!.GetValue<string>());
         Assert.Equal("agent-framework", handler.Events[0]["identity"]!["agent_source"]!.GetValue<string>());
-        Assert.Equal("0.3.0", handler.Events[0]["collector"]!["version"]!.GetValue<string>());
+        Assert.Equal("0.3.1", handler.Events[0]["collector"]!["version"]!.GetValue<string>());
         Assert.Equal("turn", handler.Events[0]["session"]!["correlation_id"]!.GetValue<string>());
         Assert.Null(handler.Events[0]["payload"]!["attachments"]);
     }

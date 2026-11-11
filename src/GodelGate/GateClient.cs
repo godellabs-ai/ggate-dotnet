@@ -17,7 +17,7 @@ namespace GodelGate;
 /// Console cannot confirm that release.</summary>
 public sealed class GateClient : IAsyncDisposable
 {
-    public const string Version = "0.3.0";
+    public const string Version = "0.3.1";
     public GateOptions Options { get; }
     private readonly HttpClient _http;
     private readonly bool _ownsHttp;

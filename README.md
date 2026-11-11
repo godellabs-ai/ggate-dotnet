@@ -1,6 +1,6 @@
 # Gödel Gate .NET SDK
 
-Version 0.3.0, released with Gödel Gate Console 0.3.0. Targets .NET 8 and .NET 10.
+Version 0.3.1, released with Gödel Gate Console 0.3.1. Targets .NET 8 and .NET 10.
 The core package has no third-party runtime dependencies. The optional Microsoft 365 package
 uses Microsoft's public middleware contract. See the example and validation instructions below.
 
@@ -10,7 +10,7 @@ Pin the release selected by your Console. The versioned GitHub release contains 
 NuGet package files for a local feed; it does not follow changes on `main`.
 
 ```sh
-git clone --branch v0.3.0 --depth 1 https://github.com/godellabs-ai/ggate-dotnet.git ../ggate-dotnet
+git clone --branch v0.3.1 --depth 1 https://github.com/godellabs-ai/ggate-dotnet.git ../ggate-dotnet
 ```
 
 These are local source packages; they have not been published to NuGet. Clone this repository beside
@@ -170,6 +170,12 @@ streaming content that has already been delivered. Instrument those application 
 - `GGATE_REDACT=1` masks common secrets before upload. It is off by default so Gate can detect
   them. Redaction is pattern-based, not a complete sensitive-data classification system.
 - `GGATE_DISABLED=1` bypasses scanning. Queue size and cooldown are configurable in `GateOptions`.
+
+Gate is responsible for masking the evaluated event before storage, including nested tool
+arguments and detected personal data. Keep Gate updated with its storage-redaction fixes;
+an SDK update cannot protect records written by an older server. A block prevents the guarded
+action, but the content has already been sent to Gate for evaluation. SDK masking is an optional,
+pattern-based privacy control, not a substitute for server-side storage masking.
 
 The API key is exchanged for short-lived bearer tokens via `/api/v1/detection-engine/token`;
 refresh tokens rotate via `/api/v1/detection-engine/token/refresh`. Scans use `/api/v1/scan`.
