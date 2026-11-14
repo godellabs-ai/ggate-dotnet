@@ -12,28 +12,46 @@ using System.Threading.Channels;
 namespace GodelGate;
 
 /// <summary>Scans against the Console; no endpoint agent is required. Transport failures fail open, with
-/// one exception: a Kill Switch lock the Console reported throws GateAgentContainedException in both
+/// two exceptions. A Kill Switch lock the Console reported throws GateAgentContainedException in both
 /// modes, turns audit scanning synchronous so a release is seen at once, and stays in force while the
-/// Console cannot confirm that release.</summary>
+/// Console cannot confirm that release. And General Settings sets a default for when the Console is down
+/// plus exceptions (users, teams, tags, agents) that get the opposite: every answered scan carries what
+/// applies to its user and this agent (<c>console_outage_action</c>) and to this agent's other users
+/// (<c>console_outage_fallback</c>). When that is <c>block</c> and a later waited-for scan cannot reach
+/// the Console at all, the scan returns a block instead of failing open.
+/// A Console that answered with an error, or a scan still running when the budget ran out, keeps failing
+/// open, as does a client that has not yet heard from the Console.</summary>
 public sealed class GateClient : IAsyncDisposable
 {
     public const string Version = "0.3.1";
     public GateOptions Options { get; }
     private readonly HttpClient _http;
+    private readonly Task<Dictionary<string, string>> _workloadIdentity;
     private readonly bool _ownsHttp;
     private readonly SemaphoreSlim _authLock = new(1, 1);
     private readonly Channel<JsonObject> _queue;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _worker;
     private readonly string _session = "dotnet-sdk-" + Guid.NewGuid();
-    private string? _accessToken, _refreshToken;
+    private string? _accessToken, _refreshToken, _credential;
     private DateTimeOffset _expires;
     private long _retryAfter, _pending;
     private bool _disposed;
+    // What the Console said to do while it is down: per user (key "" when anonymous), for users not yet
+    // scanned, and whether the failure behind the current cooldown was the Console being unreachable.
+    private const int MaxOutageSubjects = 10_000;
+    private readonly ConcurrentDictionary<string, bool> _outageBlocks = new();
+    private volatile bool _outageFallbackBlocks, _cooldownOutage;
     private readonly ConcurrentDictionary<(string? User, string Framework), Decision> _locks = new();
 
     /// <summary>Whether any user/framework on this client has a known Kill Switch lock.</summary>
     public bool Contained => !_locks.IsEmpty;
+
+    /// <summary>What a scan for <paramref name="user"/> gets while the Console is unreachable (<c>allow</c> or
+    /// <c>block</c>), as last learned from an answer.</summary>
+    public string ConsoleOutageAction(string? user = null) => OutageBlocks(user?.Trim().ToLowerInvariant()) ? "block" : "allow";
+
+    private bool OutageBlocks(string? user) => _outageBlocks.TryGetValue(user ?? "", out var blocks) ? blocks : _outageFallbackBlocks;
 
     public GateClient(GateOptions options, HttpClient? httpClient = null)
     {
@@ -45,6 +63,7 @@ public sealed class GateClient : IAsyncDisposable
             || uri.Scheme is not ("https" or "http") || !string.IsNullOrEmpty(uri.UserInfo)))
             throw new ArgumentException("ConsoleUrl must be an HTTP(S) URL without credentials.");
         Options = options;
+        _workloadIdentity = options.Enabled && options.CloudInstanceMetadata ? GodelGate.WorkloadMetadata.DiscoverAsync(options.WorkloadIdentity) : Task.FromResult(new Dictionary<string, string>());
         _http = httpClient ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
         // Edge bot filters reject clients without a user agent, and a rejected scan fails open.
         if (_http.DefaultRequestHeaders.UserAgent.Count == 0) _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", $"ggate-dotnet-sdk/{Version}");
@@ -67,6 +86,13 @@ public sealed class GateClient : IAsyncDisposable
             ["server"] = options?.Server ?? options?.Framework ?? "generic", ["service"] = options?.Service,
             ["server_info"] = Wire.Node(options?.ServerInfo), ["input_summary"] = Wire.Node(input) },
             Wire.Node(input)?.ToJsonString() ?? tool, false, options, cancellationToken);
+
+    /// <summary>Scan plaintext and metadata before persistence. Always waits, including in audit mode.
+    /// Enforcement defaults to true; pass enforce=false and inspect the decision for manual handling.</summary>
+    public Task<Decision> ScanMemoryWriteAsync(object? content, ScanOptions? options = null,
+        CancellationToken cancellationToken = default, string store = "memory", string operation = "put", bool enforce = true) =>
+        ScanToolCallAsync("memory.write", new { store, operation, content },
+            (options ?? new ScanOptions { Framework = "memory" }) with { Wait = true, Enforce = enforce }, cancellationToken);
 
     public Task<Decision> ScanToolResultAsync(string tool, string output, ScanOptions? options = null, CancellationToken cancellationToken = default) =>
         ScanAsync(new JsonObject { ["surface"] = "tool_result", ["tool"] = tool, ["output"] = output,
@@ -106,10 +132,11 @@ public sealed class GateClient : IAsyncDisposable
             ["event"] = new JsonObject {
                 ["id"] = Guid.NewGuid().ToString(), ["timestamp"] = DateTimeOffset.UtcNow.ToString("O"),
                 ["phase"] = pre ? "pre" : "post",
+                ["workload_identity"] = Wire.Node(await _workloadIdentity),
                 ["identity"] = Wire.Node(new { org_id = Options.OrgId, user, host = Options.Host,
                     workstation_id = Options.WorkstationId, agent_source = "agent-framework", agent_name = Options.AgentName,
                     team = Options.Team, agent_version = Version, install_source = "manual" }),
-                ["session"] = Wire.Node(new { session_id = options.SessionId ?? GateSession.Current ?? _session, correlation_id = options.CorrelationId,
+                ["session"] = Wire.Node(new { agent_id = options.AgentId, agent_type = options.AgentType, session_id = options.SessionId ?? GateSession.Current ?? _session, correlation_id = options.CorrelationId,
                     parent_event_id = options.ParentEventId, repo = options.Repo, source_trust = options.SourceTrust, permission_mode = options.PermissionMode }),
                 ["collector"] = Wire.Node(new { collector_id = Options.CollectorId ?? $"{Options.WorkstationId}:ggate-dotnet-sdk",
                     collector_type = "sdk", name = "ggate-dotnet-sdk", version = Version,
@@ -147,9 +174,31 @@ public sealed class GateClient : IAsyncDisposable
         return decision;
     }
 
-    /// <summary>The Console gave no answer: fail open, unless a known lock has not been released.</summary>
-    private Decision Unavailable(string message, (string? User, string Framework) subject) =>
-        _locks.TryGetValue(subject, out var held) ? Decision.KillSwitchHeld(held, "the Console has not confirmed a release") : Decision.Unavailable(message);
+    /// <summary>The Console gave no answer: fail open, unless a known lock has not been released or the Console
+    /// is down and its settings block events until it is back.</summary>
+    private Decision Unavailable(string message, (string? User, string Framework) subject, bool outage = false) =>
+        _locks.TryGetValue(subject, out var held) ? Decision.KillSwitchHeld(held, "the Console has not confirmed a release")
+        : outage && OutageBlocks(subject.User) ? Decision.ConsoleOutage()
+        : Decision.Unavailable(message);
+
+    /// <summary>Remember the Console's outage answer from an answered scan. Older Consoles omit it.</summary>
+    private void Learn(JsonObject result, string? user)
+    {
+        if (OutageAction(result, "console_outage_fallback") is { } fallback) _outageFallbackBlocks = fallback;
+        if (OutageAction(result, "console_outage_action") is not { } blocks) return;
+        // Bounded: past the cap, start over from the fallback rather than grow without limit.
+        if (_outageBlocks.Count >= MaxOutageSubjects) _outageBlocks.Clear();
+        _outageBlocks[user ?? ""] = blocks;
+    }
+
+    private static bool? OutageAction(JsonObject result, string key) =>
+        result[key] is JsonValue value && value.TryGetValue<string>(out var action) && action is "allow" or "block"
+            ? action == "block" : null;
+
+    /// <summary>No connection at all (DNS, refused, reset, TLS), or a gateway answering for a Console that is down.
+    /// A budget timeout is not: the Console may still have been working on the scan.</summary>
+    private static bool IsConsoleUnreachable(Exception ex) =>
+        ex is ConsoleUnreachableException || ex is HttpRequestException { StatusCode: null };
 
     private static (string? User, string Framework) Subject(string? user, string framework) =>
         (user?.Trim().ToLowerInvariant(), Regex.Replace(framework.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim('-'));
@@ -159,10 +208,10 @@ public sealed class GateClient : IAsyncDisposable
         // Read queued identity from the event, never from the queue worker's ambient context.
         var subject = Subject(request["event"]!["identity"]!["user"]?.GetValue<string>(),
             request["event"]!["source"]!["client"]!.GetValue<string>());
-        if (string.IsNullOrWhiteSpace(Options.ConsoleUrl) || string.IsNullOrWhiteSpace(Options.ApiKey))
+        if (string.IsNullOrWhiteSpace(Options.ConsoleUrl) || string.IsNullOrWhiteSpace(Options.ResolveApiKey()))
             return Unavailable("GGATE_CONSOLE_URL and GGATE_API_KEY are required to scan", subject);
         if (DateTimeOffset.UtcNow.UtcTicks < Interlocked.Read(ref _retryAfter))
-            return Unavailable("Console unavailable (cooling down after failure)", subject);
+            return Unavailable("Console unavailable (cooling down after failure)", subject, _cooldownOutage);
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(Options.Timeout);
         try
@@ -177,15 +226,19 @@ public sealed class GateClient : IAsyncDisposable
                 result = await ReadAsync(retry, budget.Token);
             }
             else result = await ReadAsync(first, budget.Token);
+            Learn(result, subject.User);
             var decision = Decision.FromJson(result);
+            _cooldownOutage = false;
             Interlocked.Exchange(ref _retryAfter, decision.FailOpen ? (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks : 0);
             return Observe(decision, subject);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException or InvalidOperationException)
         {
+            var outage = IsConsoleUnreachable(ex);
+            _cooldownOutage = outage;
             Interlocked.Exchange(ref _retryAfter, (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks);
-            return Unavailable($"Console scan unavailable ({ex.GetType().Name})", subject);
+            return Unavailable($"Console scan unavailable ({ex.GetType().Name})", subject, outage);
         }
     }
 
@@ -194,6 +247,8 @@ public sealed class GateClient : IAsyncDisposable
         await _authLock.WaitAsync(ct);
         try
         {
+            var key = Options.ResolveApiKey();
+            if (key != _credential) { _credential = key; _accessToken = null; _refreshToken = null; }
             if (_accessToken is not null && _accessToken != rejectedToken && _expires > DateTimeOffset.UtcNow.AddSeconds(60)) return _accessToken;
             if (_refreshToken is not null)
             {
@@ -203,7 +258,7 @@ public sealed class GateClient : IAsyncDisposable
                 _refreshToken = null;
             }
             using var exchange = new HttpRequestMessage(HttpMethod.Post, Options.ConsoleUrl!.TrimEnd('/') + "/api/v1/detection-engine/token");
-            exchange.Headers.Add("x-api-key", Options.ApiKey);
+            exchange.Headers.Add("x-api-key", key);
             using var exchanged = await _http.SendAsync(exchange, ct);
             return AcceptToken(await ReadAsync(exchanged, ct));
         }
@@ -231,6 +286,9 @@ public sealed class GateClient : IAsyncDisposable
     }
     private static async Task<JsonObject> ReadAsync(HttpResponseMessage response, CancellationToken ct)
     {
+        if (response.StatusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout
+            && !(await response.Content.ReadAsStringAsync(ct)).TrimStart().StartsWith('{'))
+            throw new ConsoleUnreachableException(response.StatusCode);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<JsonObject>(ct) ?? throw new InvalidOperationException("Empty Console response");
     }

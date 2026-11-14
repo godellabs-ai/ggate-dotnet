@@ -184,7 +184,16 @@ TLS validation is enabled and redirects are disabled. To use a private CA, confi
 for production. A caller-supplied client remains owned by the caller.
 
 Transport/authentication failures return an allowed decision with `FailOpen=true`, matching
-the existing SDKs. Caller cancellation propagates. Applications requiring fail-closed behavior
+the existing SDKs. The exception is a Console outage that Console Settings → General → *Behaviour when
+the Console is down* fails closed: a default (fail open or fail closed) plus exceptions that get the
+opposite — endpoint users, teams, user tags, coding agents, provider domains, or SDK agent names such as
+this client's `AgentName`. Every answered scan carries what applies to its user (`console_outage_action`)
+and to this agent's other users (`console_outage_fallback`), remembered per user
+(`GateClient.ConsoleOutageAction(user)`). When that answer is `block`, a waited-for scan that cannot reach the Console at all — no connection, or a gateway
+answering 502/503/504 for it — returns a block with reason code `console_unreachable` (thrown as
+`GateBlockedException` when `Enforce` is set), including during the cooldown. A Console that
+answered with an error, a scan still running when `Timeout` elapsed, and a client that has not yet
+heard from the Console keep failing open. Caller cancellation propagates. Applications requiring fail-closed behavior
 must check `FailOpen` before executing or delivering content. Audit mode has a bounded queue;
 a full queue returns a fail-open decision without accepting that event. `FlushAsync` waits for
 pending work, and async disposal attempts a bounded drain. The .NET SDK does not retry failed
@@ -210,3 +219,69 @@ dotnet pack src/GodelGate.SemanticKernel/GodelGate.SemanticKernel.csproj -c Rele
 
 Tests simulate the Console's HTTP contract and use Microsoft's real TurnContext for middleware
 checks. They are not evidence of live Gate detector behavior or Microsoft tenant authentication.
+
+## Credential rotation and workload identity
+
+The SDK reads the optional collector config at `GGATE_CONFIG`, otherwise
+`$GGATE_HOME/config.yaml` (default `~/.ggate/config.yaml`). Its `api_url` supplies the Console URL
+when no explicit URL/environment override is set. The default API key comes from `api_key` in
+that file; `GGATE_API_KEY` remains a fallback.
+
+For an organization-managed environment secret, set `GGATE_API_KEY_ENV=COMPANY_GATE_KEY` or
+`api_key_env: COMPANY_GATE_KEY` in the config. This selects the **name** of the environment
+variable, not the secret. A selected source that is empty does not fall back to a stale config key.
+All coding-agent hooks support the same config/environment selector. Environment updates must
+reach the agent/service process (usually by relaunching it).
+
+For live SDK rotation, use `GGATE_API_KEY_FILE=/mounted/secret` or a synchronous key-provider
+callback. The SDK rereads the selected key source before authentication and discards cached
+access/refresh tokens when it changes. Provider, named environment, and mounted file selectors
+are authoritative in that order, followed by an explicit API key, config key and legacy environment
+fallback. Update the selected source, verify a scan, then revoke the old key; this does not provide
+a server-side rotation grace window or promise zero failed in-flight scans.
+
+Enable `GGATE_CLOUD_INSTANCE_METADATA=1` and Console **Settings → General → Cloud instance
+metadata** to include allowlisted AWS/GCP/Azure metadata plus pod/function identity. Kubernetes
+uses `POD_NAMESPACE`, `POD_NAME`, `POD_UID`, `NODE_NAME`, `POD_SERVICE_ACCOUNT`; Lambda, Cloud Run
+and Azure Functions use their service/function/instance variables. Metadata discovery never reads
+role credentials or identity tokens. Explicit workload identity is also allowlisted. The discovered
+identity is cached per client; recreate the client after a workload move.
+
+Options are `ApiKeyEnv`, `ApiKeyFile`, `ApiKeyProvider`, `CloudInstanceMetadata` and
+`WorkloadIdentity`. For example: `new GateOptions { AgentName = "Assistant", Team = "Platform",
+ApiKeyProvider = () => secretCache.CurrentKey }`. Per-call `ScanOptions.AgentId` and `AgentType`
+are carried on the event session, including tool calls and results.
+
+## Memory protection
+
+Construct `GateMemoryStore<T>(client, putDelegate, getDelegate, options)` around the store used by
+your application. `PutAsync` scans before invoking the backing write; `GetAsync` scans before
+returning a value. Both request enforcement and propagate `GateBlockedException`. Unwrapped
+access and batch/delete APIs are not intercepted. LangChain retriever callback adapters are
+available in the Python and Node SDKs; .NET applications can gate retrieved values through this
+facade or `ScanToolResultAsync` with `BeforeDelivery = true` and `Enforce = true`.
+
+`await client.ScanMemoryWriteAsync(content)` scans plaintext and metadata before persistence.
+It always waits, even in Audit mode, and throws `GateBlockedException` on Block by default.
+For manual decision handling use the named `enforce: false` parameter and inspect the result
+before writing. Optional `store` and `operation` arguments label the persistence destination.
+
+```csharp
+var protectedVectors = new GateVectorStore<string>(client,
+    (texts, ct) => PersistEmbeddingsAsync(texts, ct), // your provider write, optionally embedding first
+    text => text,
+    new ScanOptions { SessionId = "support-session" });
+await protectedVectors.UpsertAsync(new[] { "The customer prefers concise answers." });
+```
+
+For record objects, supply a `contentOf` selector returning all plaintext and metadata. The
+facade materializes and scans the whole batch before invoking the upsert delegate; a block
+prevents every record in that batch from being written. Cancellation and provider exceptions
+propagate. Use the delegate for your provider's add/update API if that is its persistence path.
+Embedding vectors alone cannot expose poisoned instructions; retain the original text for scanning.
+
+Enable **Block poisoned memory writes** in Console Policies and select **Block** (Monitor is the
+shipped default). Requires SDK and Gate builds containing this control. The scan uses the normal
+pre-action `mcp_tool` contract with tool `memory.write`, including rules, models, attribution and
+storage redaction. Transport failures retain the SDK's outage/fail-open behavior. The facade
+does not intercept unwrapped writes, provider-managed memory or delete APIs.

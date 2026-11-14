@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -9,8 +10,14 @@ public sealed record GateOptions
 {
     public string AgentName { get; init; } = Environment.GetEnvironmentVariable("GGATE_AGENT_NAME") ?? "";
     public string Team { get; init; } = Environment.GetEnvironmentVariable("GGATE_TEAM") ?? "";
-    public string? ConsoleUrl { get; init; } = Environment.GetEnvironmentVariable("GGATE_CONSOLE_URL");
-    public string? ApiKey { get; init; } = Environment.GetEnvironmentVariable("GGATE_API_KEY");
+    public string? ConsoleUrl { get; init; } = Environment.GetEnvironmentVariable("GGATE_CONSOLE_URL") ?? CredentialSource.ConfigScalar("api_url");
+    public bool CloudInstanceMetadata { get; init; } = Environment.GetEnvironmentVariable("GGATE_CLOUD_INSTANCE_METADATA") is "1" or "true" || CredentialSource.ConfigScalar("cloud_instance_metadata_enabled") == "true";
+    public IReadOnlyDictionary<string, string> WorkloadIdentity { get; init; } = new Dictionary<string, string>();
+    public string? ApiKey { get; init; }
+    public string? ApiKeyEnv { get; init; } = Environment.GetEnvironmentVariable("GGATE_API_KEY_ENV") ?? CredentialSource.ConfigScalar("api_key_env");
+    public string? ApiKeyFile { get; init; } = Environment.GetEnvironmentVariable("GGATE_API_KEY_FILE");
+    public Func<string?>? ApiKeyProvider { get; init; }
+    public string? ResolveApiKey() => CredentialSource.Resolve(this);
     public string OrgId { get; init; } = Environment.GetEnvironmentVariable("GGATE_ORG_ID") ?? "local";
     public string Host { get; init; } = Environment.MachineName;
     /// <summary>Default endpoint identity for access rules and Kill Switch locks. Override per request with GateUser.</summary>
@@ -39,6 +46,8 @@ public sealed record ScanOptions
     public string Framework { get; init; } = "generic";
     public string? Provider { get; init; }
     public string? Model { get; init; }
+    public string? AgentId { get; init; }
+    public string? AgentType { get; init; }
     public string? SessionId { get; init; }
     public string? ConversationId { get; init; }
     public string? CorrelationId { get; init; }
@@ -218,7 +227,22 @@ public sealed class Decision
     public static Decision Unavailable(string message) => new(new JsonObject {
         ["verdict"] = "pass", ["message"] = message, ["fail_open"] = true,
         ["reason_codes"] = new JsonArray("engine_unreachable") }, "pass");
+
+    /// <summary>Shown when the Console is unreachable and its General Settings block events until it is back.
+    /// Matches the Gate collectors (<c>ggate_core::console_outage::MESSAGE</c>).</summary>
+    public const string ConsoleOutageMessage =
+        "The Gödel Gate Console is unreachable and your organization blocks AI activity until it is reachable again. Retry once the Console is back.";
+
+    /// <summary>The Console is unreachable and its General Settings block events until it is back.</summary>
+    public static Decision ConsoleOutage() => new(new JsonObject {
+        ["verdict"] = "block", ["message"] = ConsoleOutageMessage, ["fail_open"] = false,
+        ["reason_codes"] = new JsonArray("console_unreachable") }, "block");
 }
+
+/// <summary>A gateway in front of the Console answered 502/503/504 for it with a non-JSON page: the Console is
+/// down. The Console's own 503 (for example an incomplete scan) carries a JSON body and is not this.</summary>
+internal sealed class ConsoleUnreachableException(HttpStatusCode status)
+    : HttpRequestException($"Console unavailable (HTTP {(int)status})", null, status);
 
 public class GateBlockedException(Decision decision) : Exception(decision.Message)
 {
