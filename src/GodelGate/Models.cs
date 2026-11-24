@@ -200,10 +200,18 @@ public sealed class Decision
     public JsonNode? MatchedDetectors => Raw["matched_detectors"];
     public JsonNode? PolicySource => Raw["policy_source"];
     public JsonNode? MatchedPolicies => Raw["matched_policies"];
+    public string? ConsoleOutageAction => ReadOutageAction("console_outage_action");
+    public string? ConsoleOutageFallback => ReadOutageAction("console_outage_fallback");
+    public string? DetectionUrl => Raw["detection_url"]?.GetValue<string>();
     public JsonNode? Detection => Raw["detection"];
     public JsonNode? DocumentIntelligence => Raw["document_intelligence"];
+    public JsonNode? ModelStatus => Raw["model_status"];
     public JsonNode? PipelineStatus => Raw["pipeline_status"];
     public JsonNode? MediaGate => Raw["media_gate"];
+
+    private string? ReadOutageAction(string key) =>
+        Raw[key] is JsonValue value && value.TryGetValue<string>(out var action) && action is "allow" or "block"
+            ? action : null;
 
     private Decision(JsonObject raw, string verdict) { Raw = raw; Verdict = verdict; }
     public static Decision FromJson(JsonObject raw)

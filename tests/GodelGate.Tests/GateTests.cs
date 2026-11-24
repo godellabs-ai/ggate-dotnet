@@ -27,6 +27,7 @@ public sealed class GateTests
         public List<string> Paths { get; } = [];
         public bool RejectFirstScan, Fail, Malformed, Locked;
         public int Exchanges, Refreshes;
+        public Func<string, HttpResponseMessage>? PartialReply;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
@@ -50,15 +51,54 @@ public sealed class GateTests
             var ev = (JsonObject)body!["event"]!;
             Events.Add((JsonObject)ev.DeepClone());
             if (RejectFirstScan) { RejectFirstScan = false; return new HttpResponseMessage(HttpStatusCode.Unauthorized); }
+            if (PartialReply is not null) return PartialReply(ev["id"]!.GetValue<string>());
             if (Malformed) return Json(new JsonObject());
             if (Locked) return Json(new JsonObject { ["verdict"] = ev["phase"]!.GetValue<string>() == "pre" ? "block" : "warn",
                 ["message"] = "AI agent is contained", ["reason_codes"] = new JsonArray("agent_contained") });
             bool blocked = ev["payload"]!.ToJsonString().Contains("DENY") && ev["phase"]!.GetValue<string>() == "pre";
             return Json(new JsonObject { ["verdict"] = blocked ? "block" : "pass", ["message"] = "policy decision",
+                ["detection_url"] = blocked ? "https://gate.example.test/detections?event=test" : null,
+                ["console_outage_action"] = "allow", ["console_outage_fallback"] = "block",
                 ["media_gate"] = new JsonObject { ["action"] = "allow" },
                 ["pipeline_status"] = new JsonObject { ["warnings"] = new JsonArray() } });
         }
         private static HttpResponseMessage Json(JsonObject body) => new(HttpStatusCode.OK) { Content = JsonContent.Create(body) };
+    }
+
+    [Fact]
+    public async Task PartialScansEnforceOnlyABoundConsoleDecision()
+    {
+        using var handler = new Handler();
+        using var http = new HttpClient(handler);
+        await using var gate = new GateClient(Options, http);
+        foreach (var status in new[] { HttpStatusCode.ServiceUnavailable, HttpStatusCode.GatewayTimeout })
+        {
+            foreach (var verdict in new[] { "block", "warn", "pass" })
+            {
+                JsonObject Reply(string id) => new() {
+                    ["event_id"] = id, ["policy_resolved"] = true,
+                    ["decision"] = new JsonObject { ["verdict"] = verdict, ["message"] = "policy", ["fail_open"] = false },
+                    ["model_status"] = new JsonObject { ["state"] = "partial" } };
+                handler.PartialReply = id => new(status) { Content = JsonContent.Create(Reply(id)) };
+                var decision = await gate.ScanPromptAsync("test");
+                Assert.Equal(verdict, decision.Verdict);
+                Assert.Equal(verdict != "block", decision.FailOpen);
+                Assert.Equal("partial", decision.ModelStatus!["state"]!.GetValue<string>());
+                if (verdict == "block")
+                    await Assert.ThrowsAsync<GateBlockedException>(() => gate.ScanPromptAsync("test", new ScanOptions { Enforce = true }));
+                foreach (var field in new[] { "event_id", "policy_resolved", "decision" })
+                {
+                    handler.PartialReply = id => {
+                        var reply = Reply(id);
+                        reply[field] = field switch { "event_id" => "other", "policy_resolved" => false, _ => new JsonObject { ["verdict"] = "block" } };
+                        return new(status) { Content = JsonContent.Create(reply) };
+                    };
+                    var invalid = await gate.ScanPromptAsync("test");
+                    Assert.True(invalid.FailOpen);
+                    Assert.False(invalid.Blocked);
+                }
+            }
+        }
     }
 
     [Fact]
@@ -70,14 +110,20 @@ public sealed class GateTests
         var decision = await gate.ScanPromptAsync("hello", new ScanOptions { SessionId = "session", CorrelationId = "turn" });
         Assert.True(decision.Allowed);
         Assert.NotNull(decision.MediaGate);
+        Assert.Null(decision.DetectionUrl);
+        Assert.Equal("allow", decision.ConsoleOutageAction);
+        Assert.Equal("block", decision.ConsoleOutageFallback);
         Assert.NotNull(decision.PipelineStatus);
         Assert.Equal(1, handler.Exchanges);
         Assert.Equal(1, handler.Refreshes);
         Assert.Equal(handler.Events[0]["id"]!.GetValue<string>(), handler.Events[1]["id"]!.GetValue<string>());
         Assert.Equal("agent-framework", handler.Events[0]["identity"]!["agent_source"]!.GetValue<string>());
-        Assert.Equal("0.3.1", handler.Events[0]["collector"]!["version"]!.GetValue<string>());
+        Assert.Equal("0.4.0", handler.Events[0]["collector"]!["version"]!.GetValue<string>());
         Assert.Equal("turn", handler.Events[0]["session"]!["correlation_id"]!.GetValue<string>());
         Assert.Null(handler.Events[0]["payload"]!["attachments"]);
+        var denied = await gate.ScanPromptAsync("DENY");
+        Assert.True(denied.Blocked);
+        Assert.Equal("https://gate.example.test/detections?event=test", denied.DetectionUrl);
     }
 
     [Fact]

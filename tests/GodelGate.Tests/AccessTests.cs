@@ -16,7 +16,7 @@ public sealed class AccessTests
     private sealed class Handler : HttpMessageHandler
     {
         public ConcurrentQueue<JsonObject> Events { get; } = new();
-        public bool Locked, Down;
+        public bool Locked, Down, Malformed;
         public string Verdict = "pass";
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -26,6 +26,7 @@ public sealed class AccessTests
             var body = await request.Content!.ReadFromJsonAsync<JsonObject>(cancellationToken);
             var ev = (JsonObject)body!["event"]!;
             Events.Enqueue(ev);
+            if (Malformed) return Json(new JsonObject());
             if (Locked && User(ev) == "alice@example.com" && ev["source"]!["client"]!.GetValue<string>() == "openai")
                 return Json(new JsonObject { ["verdict"] = ev["phase"]!.GetValue<string>() == "pre" ? "block" : "warn",
                     ["reason_codes"] = new JsonArray("agent_contained") });
@@ -170,6 +171,9 @@ public sealed class AccessTests
         await gate.ScanPromptAsync("other user", alice with { User = "bob@example.com", Enforce = true });
         await gate.ScanPromptAsync("other framework", alice with { Framework = "langchain", Enforce = true });
         Assert.True(gate.Contained);
+        handler.Malformed = true;
+        await Assert.ThrowsAsync<GateAgentContainedException>(() => gate.ScanPromptAsync("no verdict", alice));
+        handler.Malformed = false;
         handler.Down = true;
         await Assert.ThrowsAsync<GateAgentContainedException>(() => gate.ScanPromptAsync("locked", alice with { User = "ALICE@example.com" }));
         Assert.True((await gate.ScanPromptAsync("unlocked", alice with { User = "bob@example.com", Enforce = true })).FailOpen);
