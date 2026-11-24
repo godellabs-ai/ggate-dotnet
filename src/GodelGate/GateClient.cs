@@ -23,7 +23,7 @@ namespace GodelGate;
 /// open, as does a client that has not yet heard from the Console.</summary>
 public sealed class GateClient : IAsyncDisposable
 {
-    public const string Version = "0.3.1";
+    public const string Version = "0.4.0";
     public GateOptions Options { get; }
     private readonly HttpClient _http;
     private readonly Task<Dictionary<string, string>> _workloadIdentity;
@@ -170,7 +170,9 @@ public sealed class GateClient : IAsyncDisposable
     private Decision Observe(Decision decision, (string? User, string Framework) subject)
     {
         if (decision.Contained) _locks[subject] = decision;
-        else if (!decision.FailOpen) _locks.TryRemove(subject, out _);
+        else if (!decision.FailOpen && decision.ModelStatus is null) _locks.TryRemove(subject, out _);
+        else if (_locks.TryGetValue(subject, out var held))
+            return Decision.KillSwitchHeld(held, "the Console has not confirmed a release");
         return decision;
     }
 
@@ -182,18 +184,14 @@ public sealed class GateClient : IAsyncDisposable
         : Decision.Unavailable(message);
 
     /// <summary>Remember the Console's outage answer from an answered scan. Older Consoles omit it.</summary>
-    private void Learn(JsonObject result, string? user)
+    private void Learn(Decision decision, string? user)
     {
-        if (OutageAction(result, "console_outage_fallback") is { } fallback) _outageFallbackBlocks = fallback;
-        if (OutageAction(result, "console_outage_action") is not { } blocks) return;
+        if (decision.ConsoleOutageFallback is { } fallback) _outageFallbackBlocks = fallback == "block";
+        if (decision.ConsoleOutageAction is not { } action) return;
         // Bounded: past the cap, start over from the fallback rather than grow without limit.
         if (_outageBlocks.Count >= MaxOutageSubjects) _outageBlocks.Clear();
-        _outageBlocks[user ?? ""] = blocks;
+        _outageBlocks[user ?? ""] = action == "block";
     }
-
-    private static bool? OutageAction(JsonObject result, string key) =>
-        result[key] is JsonValue value && value.TryGetValue<string>(out var action) && action is "allow" or "block"
-            ? action == "block" : null;
 
     /// <summary>No connection at all (DNS, refused, reset, TLS), or a gateway answering for a Console that is down.
     /// A budget timeout is not: the Console may still have been working on the scan.</summary>
@@ -217,19 +215,20 @@ public sealed class GateClient : IAsyncDisposable
         try
         {
             var token = await TokenAsync(null, budget.Token);
+            var eventId = request["event"]!["id"]!.GetValue<string>();
             using var first = await PostAsync("/api/v1/scan", request, token, budget.Token);
             JsonObject result;
             if (first.StatusCode == HttpStatusCode.Unauthorized)
             {
                 token = await TokenAsync(token, budget.Token);
                 using var retry = await PostAsync("/api/v1/scan", request, token, budget.Token);
-                result = await ReadAsync(retry, budget.Token);
+                result = await ReadAsync(retry, budget.Token, eventId);
             }
-            else result = await ReadAsync(first, budget.Token);
-            Learn(result, subject.User);
+            else result = await ReadAsync(first, budget.Token, eventId);
             var decision = Decision.FromJson(result);
+            Learn(decision, subject.User);
             _cooldownOutage = false;
-            Interlocked.Exchange(ref _retryAfter, decision.FailOpen ? (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks : 0);
+            Interlocked.Exchange(ref _retryAfter, decision.FailOpen && decision.ModelStatus is null ? (DateTimeOffset.UtcNow + Options.Cooldown).UtcTicks : 0);
             return Observe(decision, subject);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -284,14 +283,34 @@ public sealed class GateClient : IAsyncDisposable
             return await _http.SendAsync(request, ct);
         }
     }
-    private static async Task<JsonObject> ReadAsync(HttpResponseMessage response, CancellationToken ct)
+    private static async Task<JsonObject> ReadAsync(HttpResponseMessage response, CancellationToken ct, string? eventId = null)
     {
-        if (response.StatusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout
-            && !(await response.Content.ReadAsStringAsync(ct)).TrimStart().StartsWith('{'))
-            throw new ConsoleUnreachableException(response.StatusCode);
+        if (response.StatusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (!body.TrimStart().StartsWith('{')) throw new ConsoleUnreachableException(response.StatusCode);
+            if (eventId is not null && response.StatusCode is (HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+                && JsonNode.Parse(body) is JsonObject partial && PartialScan(partial, eventId) is { } resolved)
+                return resolved;
+        }
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<JsonObject>(ct) ?? throw new InvalidOperationException("Empty Console response");
     }
+    // Only the Console's decision resolved for this exact event is authoritative on a partial scan.
+    private static JsonObject? PartialScan(JsonObject result, string eventId)
+    {
+        if (result["event_id"]?.GetValue<string>() != eventId || result["policy_resolved"]?.GetValue<bool>() != true
+            || result["decision"] is not JsonObject decision || decision["kind"]?.GetValue<string>() is not (null or "verdict")
+            || decision["verdict"]?.GetValue<string>() is not ("pass" or "warn" or "block" or "system")
+            || decision["message"]?.GetValue<string>() is null || decision["fail_open"]?.GetValue<bool>() is not { } failOpen)
+            return null;
+        decision["fail_open"] = failOpen || decision["verdict"]!.GetValue<string>() != "block";
+        decision["model_status"] = result["model_status"]?.DeepClone() ?? new JsonObject { ["state"] = "unknown" };
+        decision["pipeline_status"] = result["pipeline_status"]?.DeepClone();
+        decision["document_intelligence"] = result["document_intelligence"]?.DeepClone();
+        return decision;
+    }
+
     private async Task DrainAsync()
     {
         try
